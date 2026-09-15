@@ -1,7 +1,7 @@
 [project]
 name = "prompt-manager"
 description = "ComfyUI prompt word template management plug-in. Instead of adding any nodes to the canvas, a \"Prompt Word Assistant\" button is provided in the operation bar to open a full-screen modal box to manage the prompt word template with variables. After filling in the variables, copy the merged results with one click."
-version = "1.0.0"
+version = "1.0.1"
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
 dependencies = []

@@ -1,12 +1,15 @@
 // 提示词助手：action bar 按钮 + 全屏模态框，模板存 localStorage
 const STORAGE_KEY = "comfyui-prompt-manager.templates.v1";
+const CATEGORY_KEY = "comfyui-prompt-manager.categories.v1";
 const VAR_RE = /\{\{\{([^{}]+)\}\}\}/g;
 
 function loadTemplates() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     const list = raw ? JSON.parse(raw) : [];
-    return Array.isArray(list) ? list : [];
+    if (!Array.isArray(list)) return [];
+    // 兼容存量数据：缺失 category 字段视为未分类
+    return list.map(t => ({ ...t, category: typeof t.category === "string" ? t.category : "" }));
   } catch {
     return [];
   }
@@ -14,6 +17,20 @@ function loadTemplates() {
 
 function saveTemplates(list) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+}
+
+function loadCategories() {
+  try {
+    const raw = localStorage.getItem(CATEGORY_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list.filter(c => typeof c === "string" && c.trim()) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveCategories(list) {
+  localStorage.setItem(CATEGORY_KEY, JSON.stringify(list));
 }
 
 function newId() {
@@ -113,6 +130,15 @@ const CSS = `
 .cpm-empty svg{color:#3a4150}
 .cpm-empty-text{font-size:14px}
 .cpm-foot-between{justify-content:space-between}
+.cpm-tabs{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-bottom:14px}
+.cpm-tab{display:inline-flex;align-items:center;gap:5px;padding:4px 12px;font-size:13px;border-radius:999px;background:#16181d;border:1px solid #2a2e37;color:#c6cbd4;cursor:pointer}
+.cpm-tab:hover{background:#1c1f26;color:#e8eaf0}
+.cpm-tab.active{background:#5b8cff;border-color:#5b8cff;color:#fff}
+.cpm-tab-x{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;padding:0;font-size:13px;line-height:1;border:none;border-radius:50%;background:transparent;color:inherit;opacity:.65;cursor:pointer}
+.cpm-tab-x:hover{opacity:1;background:rgba(255,255,255,.18)}
+.cpm-cat-form{display:flex;align-items:center;gap:8px;margin:-6px 0 14px}
+.cpm-cat-input{flex:1;width:auto;max-width:260px}
+select.cpm-input{cursor:pointer}
 button:has(.cpm-ab-icon){width:30px;height:30px;min-width:30px;padding:0;gap:0;border-radius:4px;background-color:#212121;color:#fff;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0}
 button:has(.cpm-ab-icon):hover{background-color:#373737;color:#fff}
 `;
@@ -124,6 +150,8 @@ let pendingDeleteId = null;
 let deleteTimer = null;
 let cssInjected = false;
 let createMenuOpen = false;
+let activeCat = "";
+let addingCategory = false;
 
 function injectCss() {
   if (cssInjected) return;
@@ -148,18 +176,36 @@ function createMenuHtml() {
   </div>`;
 }
 
-function emptyHtml() {
+function tabsHtml() {
+  const categories = loadCategories();
+  const tab = (key, label, extra) => `<span class="cpm-tab${activeCat === key ? " active" : ""}" data-act="tab" data-cat="${esc(key)}">${label}${extra || ""}</span>`;
+  return `<div class="cpm-tabs">
+    ${tab("", "全部")}
+    ${tab("__none__", "未分类")}
+    ${categories.map(c => tab(c, esc(c), `<button class="cpm-tab-x" data-act="delete-category" data-cat="${esc(c)}" title="删除分类「${esc(c)}」">×</button>`)).join("")}
+    <button class="cpm-tab cpm-tab-add" data-act="add-category" title="新增分类">＋</button>
+  </div>${addingCategory ? `<div class="cpm-cat-form">
+    <input class="cpm-input cpm-cat-input" id="cpm-new-cat" type="text" placeholder="输入分类名称，回车确认" autofocus>
+    <button class="cpm-btn cpm-btn-primary" data-act="save-category">确定</button>
+    <button class="cpm-btn" data-act="cancel-category">取消</button>
+  </div>` : ""}`;
+}
+
+function emptyHtml(msg) {
   return `<div class="cpm-empty">
     <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 13h6M9 17h4"/></svg>
-    <div class="cpm-empty-text">还没有提示词模板</div>
+    <div class="cpm-empty-text">${msg || "还没有提示词模板"}</div>
     ${createMenuHtml()}
   </div>`;
 }
 
 function listHtml() {
   const templates = loadTemplates();
-  if (!templates.length) return emptyHtml();
-  const cards = templates.map(t => {
+  const filtered = activeCat === "" ? templates
+    : activeCat === "__none__" ? templates.filter(t => !t.category)
+    : templates.filter(t => t.category === activeCat);
+  if (!filtered.length) return tabsHtml() + emptyHtml(activeCat === "" ? "还没有提示词模板" : "该分类下还没有模板");
+  const cards = filtered.map(t => {
     const vars = extractVars(t.content);
     const confirming = pendingDeleteId === t.id;
     return `<div class="cpm-card">
@@ -177,8 +223,8 @@ function listHtml() {
       </div>
     </div>`;
   }).join("");
-  return `<div class="cpm-toolbar">
-    <span class="cpm-count">共 ${templates.length} 个模板</span>
+  return `${tabsHtml()}<div class="cpm-toolbar">
+    <span class="cpm-count">共 ${filtered.length} 个模板</span>
     <div class="cpm-toolbar-actions">
       ${createMenuHtml()}
       <button class="cpm-btn" data-act="export">导出</button>
@@ -188,10 +234,19 @@ function listHtml() {
 
 function formHtml() {
   const editing = view.id ? loadTemplates().find(t => t.id === view.id) : null;
+  const categories = loadCategories();
+  const catSel = editing ? editing.category || "" : view.cat || "";
   return `<div class="cpm-view-head"><span class="cpm-view-title">${editing ? "编辑模板" : "新建模板"}</span></div>
   <div class="cpm-field">
     <label class="cpm-label">模板名称</label>
     <input class="cpm-input" id="cpm-name" type="text" placeholder="例如：写实人像通用提示词" value="${editing ? esc(editing.name) : ""}">
+  </div>
+  <div class="cpm-field">
+    <label class="cpm-label">分类</label>
+    <select class="cpm-input" id="cpm-category">
+      <option value=""${catSel === "" ? " selected" : ""}>未分类</option>
+      ${categories.map(c => `<option value="${esc(c)}"${c === catSel ? " selected" : ""}>${esc(c)}</option>`).join("")}
+    </select>
   </div>
   <div class="cpm-field">
     <label class="cpm-label">提示词内容（变量用 {{{变量名}}} 标记）</label>
@@ -235,6 +290,11 @@ function render() {
 }
 
 function bindLiveEvents() {
+  const newCat = mainEl.querySelector("#cpm-new-cat");
+  if (newCat) {
+    newCat.addEventListener("keydown", e => { if (e.key === "Enter") saveCategory(); });
+    return;
+  }
   const content = mainEl.querySelector("#cpm-content");
   if (content) {
     const preview = mainEl.querySelector("#cpm-var-preview");
@@ -268,21 +328,45 @@ function handleDelete(id) {
   }
 }
 
+function saveCategory() {
+  const el = mainEl.querySelector("#cpm-new-cat");
+  const name = el ? el.value.trim() : "";
+  if (!name) return;
+  const cats = loadCategories();
+  if (cats.includes(name)) { alert(`分类「${name}」已存在`); return; }
+  cats.push(name);
+  saveCategories(cats);
+  addingCategory = false;
+  render();
+}
+
+function deleteCategory(cat) {
+  saveCategories(loadCategories().filter(c => c !== cat));
+  const list = loadTemplates();
+  let changed = false;
+  for (const t of list) if (t.category === cat) { t.category = ""; changed = true; }
+  if (changed) saveTemplates(list);
+  if (activeCat === cat) activeCat = "";
+  render();
+}
+
 function saveForm() {
   const nameEl = mainEl.querySelector("#cpm-name");
   const contentEl = mainEl.querySelector("#cpm-content");
   const scenarioEl = mainEl.querySelector("#cpm-scenario");
+  const categoryEl = mainEl.querySelector("#cpm-category");
   const errEl = mainEl.querySelector("#cpm-form-error");
   const name = nameEl.value.trim();
   const content = contentEl.value;
   if (!name) { errEl.textContent = "请填写模板名称"; return; }
   if (!content.trim()) { errEl.textContent = "请填写提示词内容"; return; }
+  const category = categoryEl ? categoryEl.value : "";
   const list = loadTemplates();
   if (view.id) {
     const t = list.find(x => x.id === view.id);
-    Object.assign(t, { name, content, scenario: scenarioEl.value.trim(), updatedAt: Date.now() });
+    Object.assign(t, { name, content, scenario: scenarioEl.value.trim(), category, updatedAt: Date.now() });
   } else {
-    list.unshift({ id: newId(), name, content, scenario: scenarioEl.value.trim(), updatedAt: Date.now() });
+    list.unshift({ id: newId(), name, content, scenario: scenarioEl.value.trim(), category, updatedAt: Date.now() });
   }
   saveTemplates(list);
   view = { name: "list" };
@@ -333,25 +417,42 @@ function importTemplates() {
     if (!file) return;
     const reader = new FileReader();
     reader.onload = () => {
-      let data;
-      try { data = JSON.parse(reader.result); } catch { alert("导入失败：文件不是有效的 JSON"); return; }
-      if (!Array.isArray(data)) { alert("导入失败：JSON 根节点必须是模板数组"); return; }
+      let parsed;
+      try { parsed = JSON.parse(reader.result); } catch { alert("导入失败：文件不是有效的 JSON"); return; }
+      // 兼容两种格式：旧版为模板数组；新版为 { categories, templates } 对象
+      let items;
+      let importedCats = [];
+      if (Array.isArray(parsed)) {
+        items = parsed;
+      } else if (parsed && Array.isArray(parsed.templates)) {
+        items = parsed.templates;
+        importedCats = Array.isArray(parsed.categories) ? parsed.categories : [];
+      } else {
+        alert("导入失败：JSON 根节点必须是模板数组或包含 templates 的对象"); return;
+      }
       const byId = new Map(loadTemplates().map(t => [t.id, t]));
+      const cats = loadCategories();
+      for (const c of importedCats) if (typeof c === "string" && c.trim() && !cats.includes(c)) cats.push(c);
       let count = 0;
-      for (const item of data) {
+      for (const item of items) {
         if (!item || typeof item.name !== "string" || !item.name.trim() || typeof item.content !== "string") continue;
         const id = typeof item.id === "string" && item.id ? item.id : newId();
+        // 存量数据无 category 字段时归入未分类
+        const category = typeof item.category === "string" ? item.category.trim() : "";
+        if (category && !cats.includes(category)) cats.push(category);
         byId.set(id, {
           id,
           name: item.name.trim(),
           content: item.content,
           scenario: typeof item.scenario === "string" ? item.scenario.trim() : "",
+          category,
           updatedAt: Number(item.updatedAt) || Date.now(),
         });
         count++;
       }
       if (!count) { alert("导入失败：文件中没有可用的模板"); return; }
       saveTemplates([...byId.values()]);
+      saveCategories(cats);
       render();
     };
     reader.readAsText(file);
@@ -363,7 +464,7 @@ function exportTemplates() {
   const d = new Date();
   const p = n => String(n).padStart(2, "0");
   const stamp = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}`;
-  const blob = new Blob([JSON.stringify(loadTemplates(), null, 2)], { type: "application/json" });
+  const blob = new Blob([JSON.stringify({ categories: loadCategories(), templates: loadTemplates() }, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -384,14 +485,19 @@ function buildOverlay() {
   overlayEl.querySelector(".cpm-close").onclick = closeModal;
   mainEl.onclick = e => {
     if (!e.target.closest(".cpm-create-wrap")) closeCreateMenu();
-    const btn = e.target.closest("button[data-act]");
+    const btn = e.target.closest("[data-act]");
     if (!btn) return;
     const { act, id } = btn.dataset;
     switch (act) {
       case "toggle-create": createMenuOpen = !createMenuOpen; render(); break;
-      case "create-form": createMenuOpen = false; view = { name: "form" }; render(); break;
+      case "create-form": createMenuOpen = false; view = { name: "form", cat: activeCat !== "__none__" ? activeCat : "" }; render(); break;
       case "import": importTemplates(); break;
       case "export": exportTemplates(); break;
+      case "tab": activeCat = btn.dataset.cat || ""; addingCategory = false; render(); break;
+      case "add-category": addingCategory = true; render(); break;
+      case "cancel-category": addingCategory = false; render(); break;
+      case "save-category": saveCategory(); break;
+      case "delete-category": deleteCategory(btn.dataset.cat); break;
       case "back": view = { name: "list" }; render(); break;
       case "edit": view = { name: "form", id }; render(); break;
       case "apply": view = { name: "apply", id }; render(); break;
@@ -424,6 +530,8 @@ function openModal() {
 function closeModal() {
   clearTimeout(deleteTimer);
   pendingDeleteId = null;
+  activeCat = "";
+  addingCategory = false;
   overlayEl.remove();
   overlayEl = null;
   mainEl = null;
